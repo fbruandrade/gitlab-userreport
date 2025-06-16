@@ -196,6 +196,18 @@ This retry mechanism is applied to the following functions:
 - `get_user_roles`: Retrieving user roles across projects and groups
 - `get_users`: Retrieving all users and determining their billable status
 
+## Pagination for Large GitLab Instances
+
+The script implements explicit pagination when retrieving users, projects, and groups from GitLab. This ensures that all data is properly retrieved even in large GitLab instances with thousands of users, projects, or groups.
+
+Key features of the pagination implementation:
+- Retrieves data in pages of 100 items at a time
+- Continues fetching until all items are retrieved
+- Displays progress information during retrieval
+- Efficiently processes large datasets without memory issues
+
+This makes the script suitable for use with GitLab instances of any size, from small teams to large enterprises with thousands of users.
+
 ## License
 
 MIT

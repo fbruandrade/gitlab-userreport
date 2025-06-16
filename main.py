@@ -15,12 +15,13 @@ import functools
 import gitlab
 import pandas as pd
 import urllib3
+import requests
 
 
 # import ldap
 
 
-def retry_transient_errors(max_retries=3, delay=1, exceptions=(gitlab.exceptions.GitlabHttpError, gitlab.exceptions.GitlabConnectionError, gitlab.exceptions.GitlabTimeoutError)):
+def retry_transient_errors(max_retries=3, delay=1, exceptions=(gitlab.exceptions.GitlabHttpError, gitlab.exceptions.GitlabConnectionError, requests.exceptions.Timeout)):
     """
     Decorator to retry functions that might fail due to transient GitLab API errors.
 
@@ -28,6 +29,8 @@ def retry_transient_errors(max_retries=3, delay=1, exceptions=(gitlab.exceptions
         max_retries (int): Maximum number of retry attempts
         delay (int): Initial delay between retries in seconds (will be exponentially increased)
         exceptions (tuple): Tuple of exception classes to catch and retry on
+                          - GitlabHttpError: HTTP errors from the GitLab API (including timeouts)
+                          - GitlabConnectionError: Connection issues when communicating with GitLab
 
     Returns:
         function: Decorated function with retry logic
@@ -54,6 +57,7 @@ def retry_transient_errors(max_retries=3, delay=1, exceptions=(gitlab.exceptions
 
         return wrapper
     return decorator
+
 
 
 @retry_transient_errors()
@@ -249,6 +253,7 @@ def get_ad_info(username, ad_server, ad_base_dn, ad_username, ad_password):
 def get_users(gl):
     """
     Get all users from GitLab and determine their billable status.
+    Uses pagination to ensure all users are retrieved.
 
     Args:
         gl (gitlab.Gitlab): GitLab connection object
@@ -257,22 +262,45 @@ def get_users(gl):
         tuple: (all_users, billable_users, non_billable_users)
     """
     try:
-        # Get all users
-        users = gl.users.list(all=True)
-
         # Lists to store users by category
         all_users = []
-        billable_users = []
-        non_billable_users = []
 
-        # Get projects and groups for membership checks
-        projects = gl.projects.list(all=True)
-        groups = gl.groups.list(all=True)
+        # Get all users with explicit pagination
+        page = 1
+        per_page = 100
+        while True:
+            users_page = gl.users.list(page=page, per_page=per_page)
+            if not users_page:
+                break
+            all_users.extend(users_page)
+            page += 1
+            print(f"Retrieved {len(all_users)} users so far...")
+
+        # Get projects and groups for membership checks with explicit pagination
+        projects = []
+        page = 1
+        while True:
+            projects_page = gl.projects.list(page=page, per_page=per_page)
+            if not projects_page:
+                break
+            projects.extend(projects_page)
+            page += 1
+            print(f"Retrieved {len(projects)} projects so far...")
+
+        groups = []
+        page = 1
+        while True:
+            groups_page = gl.groups.list(page=page, per_page=per_page)
+            if not groups_page:
+                break
+            groups.extend(groups_page)
+            page += 1
+            print(f"Retrieved {len(groups)} groups so far...")
 
         # Process each user
-        for user in users:
-            # Add user to all_users list
-            all_users.append(user)
+        billable_users = []
+        non_billable_users = []
+        for user in all_users:
 
             # Check if user is non-billable based on criteria
             is_non_billable = False
