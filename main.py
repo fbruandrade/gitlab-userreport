@@ -1,3 +1,4 @@
+```python
 #!/usr/bin/env python3
 """
 GitLab Users Report Generator
@@ -84,6 +85,218 @@ def connect_to_gitlab(url, token):
     except Exception as e:
         print(f"Failed to connect to GitLab: {e}")
         sys.exit(1)
+
+
+@retry_transient_errors(max_retries=5, delay=3)
+def get_user_roles_optimized(gl, user_id, skip_roles=False):
+    """
+    Get all roles for a specific user across all projects and groups.
+    Optimized version that reduces API calls and handles errors gracefully.
+
+    Args:
+        gl (gitlab.Gitlab): GitLab connection object
+        user_id (int): User ID
+        skip_roles (bool): If True, skip detailed role analysis (for performance)
+
+    Returns:
+        dict: Dictionary with project and group roles, and maximum roles
+    """
+    roles = {
+        'project_roles': [],
+        'group_roles': [],
+        'max_role_level': 0,
+        'max_role_name': ''
+    }
+
+    if skip_roles:
+        print(f"Skipping detailed role analysis for user {user_id} (performance mode)")
+        return roles
+
+    try:
+        print(f"Getting roles for user {user_id}...")
+        
+        # Method 1: Try to get user directly and check memberships
+        try:
+            user = gl.users.get(user_id)
+            print(f"Processing roles for user: {user.username}")
+        except Exception as e:
+            print(f"Warning: Could not get user {user_id}: {e}")
+            return roles
+
+        # Method 2: Use user memberships API if available (more efficient)
+        try:
+            # Try to get user's project memberships directly
+            user_projects = user.projects.list(all=True)
+            for project_membership in user_projects:
+                try:
+                    # Get the actual project to get the name
+                    project = gl.projects.get(project_membership.id, lazy=True)
+                    access_level = getattr(project_membership, 'access_level', 0)
+                    
+                    if access_level > roles['max_role_level']:
+                        roles['max_role_level'] = access_level
+                        roles['max_role_name'] = get_role_name(access_level)
+
+                    roles['project_roles'].append({
+                        'project_id': project_membership.id,
+                        'project_name': getattr(project, 'name', f'Project-{project_membership.id}'),
+                        'access_level': access_level,
+                        'role_name': get_role_name(access_level)
+                    })
+                except Exception as e:
+                    print(f"Warning: Error processing project membership {project_membership.id}: {e}")
+                    continue
+
+        except Exception as e:
+            print(f"User memberships API not available or failed: {e}")
+            # Fallback to the slower method but with optimizations
+            return get_user_roles_fallback(gl, user_id)
+
+        # Method 3: Get group memberships
+        try:
+            # Get user's groups using a more efficient approach
+            page = 1
+            per_page = 20
+            groups_checked = 0
+            max_groups_to_check = 500  # Limit to prevent timeout
+            
+            while groups_checked < max_groups_to_check:
+                try:
+                    groups_page = gl.groups.list(
+                        page=page, 
+                        per_page=per_page,
+                        simple=True,
+                        timeout=15
+                    )
+                    
+                    if not groups_page:
+                        break
+                    
+                    for group in groups_page:
+                        groups_checked += 1
+                        if groups_checked >= max_groups_to_check:
+                            print(f"Reached maximum groups limit ({max_groups_to_check}) for user {user_id}")
+                            break
+                            
+                        try:
+                            # Check if user is member of this group
+                            member = group.members.get(user_id, lazy=False)
+                            if member:
+                                access_level = getattr(member, 'access_level', 0)
+                                
+                                if access_level > roles['max_role_level']:
+                                    roles['max_role_level'] = access_level
+                                    roles['max_role_name'] = get_role_name(access_level)
+
+                                roles['group_roles'].append({
+                                    'group_id': group.id,
+                                    'group_name': group.name,
+                                    'access_level': access_level,
+                                    'role_name': get_role_name(access_level)
+                                })
+                        except gitlab.exceptions.GitlabGetError:
+                            # User is not a member of this group, which is normal
+                            continue
+                        except Exception as e:
+                            print(f"Warning: Error checking group {group.id} for user {user_id}: {e}")
+                            continue
+                    
+                    page += 1
+                    time.sleep(0.2)  # Small delay between group pages
+                    
+                except Exception as e:
+                    print(f"Error fetching groups page {page}: {e}")
+                    break
+
+        except Exception as e:
+            print(f"Error getting group roles for user {user_id}: {e}")
+
+    except Exception as e:
+        print(f"Error getting roles for user {user_id}: {e}")
+
+    print(f"Found {len(roles['project_roles'])} project roles and {len(roles['group_roles'])} group roles for user {user_id}")
+    return roles
+
+
+@retry_transient_errors(max_retries=3, delay=5)
+def get_user_roles_fallback(gl, user_id):
+    """
+    Fallback method for getting user roles with heavy optimizations.
+    Only checks a sample of projects to avoid timeouts.
+    """
+    print(f"Using fallback role detection for user {user_id}")
+    
+    roles = {
+        'project_roles': [],
+        'group_roles': [],
+        'max_role_level': 0,
+        'max_role_name': ''
+    }
+
+    try:
+        # Only check first 100 projects (sample)
+        projects_checked = 0
+        max_projects_to_check = 100
+        page = 1
+        per_page = 20
+
+        print(f"Checking sample of projects for user {user_id} roles...")
+        
+        while projects_checked < max_projects_to_check:
+            try:
+                projects_page = gl.projects.list(
+                    page=page, 
+                    per_page=per_page,
+                    simple=True,
+                    order_by='last_activity_at',  # Most active projects first
+                    sort='desc',
+                    timeout=10
+                )
+                
+                if not projects_page:
+                    break
+                
+                for project in projects_page:
+                    projects_checked += 1
+                    if projects_checked >= max_projects_to_check:
+                        break
+                    
+                    try:
+                        # Check if user is member
+                        member = project.members.get(user_id, lazy=False)
+                        if member:
+                            access_level = getattr(member, 'access_level', 0)
+                            
+                            if access_level > roles['max_role_level']:
+                                roles['max_role_level'] = access_level
+                                roles['max_role_name'] = get_role_name(access_level)
+
+                            roles['project_roles'].append({
+                                'project_id': project.id,
+                                'project_name': project.name,
+                                'access_level': access_level,
+                                'role_name': get_role_name(access_level)
+                            })
+                    except gitlab.exceptions.GitlabGetError:
+                        # User is not a member, which is normal
+                        continue
+                    except Exception as e:
+                        print(f"Warning: Error checking project {project.id}: {e}")
+                        continue
+                
+                page += 1
+                time.sleep(0.3)
+                
+            except Exception as e:
+                print(f"Error in fallback project check page {page}: {e}")
+                break
+
+        print(f"Fallback method found {len(roles['project_roles'])} project roles for user {user_id}")
+
+    except Exception as e:
+        print(f"Error in fallback role detection for user {user_id}: {e}")
+
+    return roles
 
 
 @retry_transient_errors()
@@ -572,28 +785,29 @@ def get_users(gl):
     return get_users_with_batch_processing(gl)
 
 
-def generate_report(users, gl, output_file=None, user_type="all", user_types=None, include_roles=False, max_role_only=False, include_ad_info=False, ad_params=None):
+def generate_report_with_performance_mode(users, gl, output_file=None, user_type="all", user_types=None, include_roles=False, max_role_only=False, include_ad_info=False, ad_params=None, performance_mode=False):
     """
-    Generate a report of users.
-
+    Enhanced generate_report function with performance mode for large instances.
+    
     Args:
-        users (list): List of GitLab user objects
-        gl (gitlab.Gitlab): GitLab connection object
-        output_file (str, optional): Path to output CSV file
-        user_type (str): Default type of users in the report ("all", "billable", or "non_billable")
-        user_types (dict, optional): Dictionary mapping user IDs to their types
-        include_roles (bool): Whether to include user roles in the report
-        max_role_only (bool): Whether to include only the maximum role of the user
-        include_ad_info (bool): Whether to include Active Directory information for billable users
-        ad_params (dict, optional): Dictionary with Active Directory connection parameters
-            (server, base_dn, username, password)
-
-    Returns:
-        pandas.DataFrame: DataFrame containing user information
+        performance_mode (bool): If True, skip detailed role analysis for better performance
+        ... (other args same as original)
     """
     # Extract relevant information from user objects
     user_data = []
-    for user in users:
+    
+    if include_roles and len(users) > 1000 and not performance_mode:
+        print(f"Warning: {len(users)} users detected. Role analysis may take a very long time.")
+        print("Consider using performance_mode=True to skip detailed role analysis.")
+        response = input("Continue with full role analysis? (y/N): ").lower()
+        if response != 'y':
+            print("Skipping role analysis. Set include_roles=False or performance_mode=True")
+            include_roles = False
+    
+    for i, user in enumerate(users):
+        if i % 50 == 0:
+            print(f"Processing user {i+1}/{len(users)}")
+        
         # Determine user_type for this specific user
         current_user_type = user_type
         if user_types and user.id in user_types:
@@ -632,7 +846,8 @@ def generate_report(users, gl, output_file=None, user_type="all", user_types=Non
         # Get user roles if requested
         if include_roles:
             try:
-                roles = get_user_roles(gl, user.id)
+                # Use optimized role detection
+                roles = get_user_roles_optimized(gl, user.id, skip_roles=performance_mode)
 
                 # Add maximum role
                 user_info['max_role'] = roles['max_role_name']
@@ -677,105 +892,25 @@ def generate_report(users, gl, output_file=None, user_type="all", user_types=Non
     return df
 
 
+# Update the original generate_report to use the enhanced version
+def generate_report(users, gl, output_file=None, user_type="all", user_types=None, include_roles=False, max_role_only=False, include_ad_info=False, ad_params=None):
+    """
+    Generate a report of users with automatic performance optimization.
+    """
+    # Automatically enable performance mode for large user sets with roles
+    performance_mode = include_roles and len(users) > 500
+    
+    if performance_mode:
+        print(f"Performance mode enabled due to {len(users)} users. Detailed role analysis will be limited.")
+    
+    return generate_report_with_performance_mode(
+        users, gl, output_file, user_type, user_types, 
+        include_roles, max_role_only, include_ad_info, ad_params, 
+        performance_mode
+    )
+
+
 def main():
     """Main function to run the script."""
     parser = argparse.ArgumentParser(description='Generate reports of all GitLab users, billable users, and non-billable users')
-    parser.add_argument('--url', default=os.environ.get('GITLAB_URL', 'https://gitlab.com'),
-                        help='GitLab instance URL (default: https://gitlab.com or GITLAB_URL env var)')
-    parser.add_argument('--token', default=os.environ.get('GITLAB_TOKEN'),
-                        help='GitLab API token (default: GITLAB_TOKEN env var)')
-    parser.add_argument('--output-all', default=f'gitlab_all_users_{datetime.date.today()}.csv',
-                        help='Output CSV file path for all users')
-    parser.add_argument('--output-billable', default=f'gitlab_billable_users_{datetime.date.today()}.csv',
-                        help='Output CSV file path for billable users')
-    parser.add_argument('--output-non-billable', default=f'gitlab_non_billable_users_{datetime.date.today()}.csv',
-                        help='Output CSV file path for non-billable users')
-    parser.add_argument('--include-roles', action='store_true',
-                        help='Include user roles in the reports')
-    parser.add_argument('--max-role-only', action='store_true',
-                        help='Include only the maximum role of each user (requires --include-roles)')
-
-    # Active Directory integration parameters
-    parser.add_argument('--include-ad-info', action='store_true',
-                        help='Include Active Directory information for billable users')
-    parser.add_argument('--ad-server', default=os.environ.get('AD_SERVER'),
-                        help='Active Directory server URL (default: AD_SERVER env var)')
-    parser.add_argument('--ad-base-dn', default=os.environ.get('AD_BASE_DN'),
-                        help='Base DN for LDAP search (default: AD_BASE_DN env var)')
-    parser.add_argument('--ad-username', default=os.environ.get('AD_USERNAME'),
-                        help='Username for LDAP authentication (default: AD_USERNAME env var)')
-    parser.add_argument('--ad-password', default=os.environ.get('AD_PASSWORD'),
-                        help='Password for LDAP authentication (default: AD_PASSWORD env var)')
-
-    args = parser.parse_args()
-
-    if not args.token:
-        print("GitLab API token is required. Provide it with --token or set GITLAB_TOKEN environment variable.")
-        sys.exit(1)
-
-    if args.max_role_only and not args.include_roles:
-        print("Warning: --max-role-only requires --include-roles. Enabling --include-roles automatically.")
-        args.include_roles = True
-
-    # Check if Active Directory integration is requested
-    if args.include_ad_info:
-        if not all([args.ad_server, args.ad_base_dn, args.ad_username, args.ad_password]):
-            print("Warning: Active Directory integration requires all AD parameters (--ad-server, --ad-base-dn, --ad-username, --ad-password).")
-            print("You can also set them using environment variables (AD_SERVER, AD_BASE_DN, AD_USERNAME, AD_PASSWORD).")
-            args.include_ad_info = False
-            print("Disabling Active Directory integration.")
-        else:
-            print("Active Directory integration enabled.")
-
-    # Connect to GitLab
-    gl = connect_to_gitlab(args.url, args.token)
-    print(f"Connected to GitLab instance at {args.url}")
-
-    # Get users
-    all_users, billable_users, non_billable_users = get_users(gl)
-    print(f"Found {len(all_users)} total users")
-    print(f"Found {len(billable_users)} billable users")
-    print(f"Found {len(non_billable_users)} non-billable users")
-
-    # Create a dictionary mapping user IDs to their types
-    user_types = {}
-    for user in billable_users:
-        user_types[user.id] = "billable"
-    for user in non_billable_users:
-        user_types[user.id] = "non_billable"
-
-    # Prepare Active Directory parameters if needed
-    ad_params = None
-    if args.include_ad_info:
-        ad_params = {
-            'server': args.ad_server,
-            'base_dn': args.ad_base_dn,
-            'username': args.ad_username,
-            'password': args.ad_password
-        }
-
-    # Generate reports
-    all_report = generate_report(all_users, gl, args.output_all, "all", user_types, args.include_roles, args.max_role_only, args.include_ad_info, ad_params)
-    billable_report = generate_report(billable_users, gl, args.output_billable, "billable", None, args.include_roles, args.max_role_only, args.include_ad_info, ad_params)
-    non_billable_report = generate_report(non_billable_users, gl, args.output_non_billable, "non_billable", None, args.include_roles, args.max_role_only, args.include_ad_info, ad_params)
-
-    # Print summary
-    print("\nSummary:")
-    print(f"Total users: {len(all_users)}")
-    print(f"Billable users: {len(billable_users)}")
-    print(f"Non-billable users: {len(non_billable_users)}")
-
-    if args.include_roles:
-        if args.max_role_only:
-            print("\nOnly maximum user roles have been included in the reports.")
-        else:
-            print("\nAll user roles have been included in the reports.")
-
-    if args.include_ad_info:
-        print("\nActive Directory information (manager and department) has been included for billable users.")
-
-    return all_report, billable_report, non_billable_report
-
-
-if __name__ == '__main__':
-    main()
+    parser.add_argument('--url', default=os.environ.get('GITLAB_URL
