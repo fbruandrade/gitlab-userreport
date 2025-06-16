@@ -18,7 +18,7 @@ import urllib3
 import requests
 
 
-# import ldap
+import ldap
 
 
 def retry_transient_errors(max_retries=3, delay=1, exceptions=(gitlab.exceptions.GitlabHttpError, gitlab.exceptions.GitlabConnectionError, requests.exceptions.Timeout)):
