@@ -16,7 +16,8 @@ import gitlab
 import pandas as pd
 import urllib3
 import requests
-
+import json
+import pickle
 
 import ldap
 
@@ -249,96 +250,326 @@ def get_ad_info(username, ad_server, ad_base_dn, ad_username, ad_password):
 
     return ad_info
 
-@retry_transient_errors()
-def get_users(gl):
+@retry_transient_errors(max_retries=10, delay=5)
+def get_all_projects_with_checkpoints(gl, per_page=10, checkpoint_file='projects_checkpoint.json'):
     """
-    Get all users from GitLab and determine their billable status.
-    Uses pagination to ensure all users are retrieved.
-
+    Get all projects from GitLab with checkpoint system for recovery.
+    
     Args:
         gl (gitlab.Gitlab): GitLab connection object
+        per_page (int): Very small page size for stability
+        checkpoint_file (str): File to save progress
+    
+    Returns:
+        list: List of all projects
+    """
+    projects = []
+    start_page = 1
+    
+    # Try to load checkpoint
+    try:
+        with open(checkpoint_file, 'r') as f:
+            checkpoint_data = json.load(f)
+            start_page = checkpoint_data.get('last_page', 1)
+            print(f"Resuming from checkpoint - starting at page {start_page}")
+    except FileNotFoundError:
+        print("No checkpoint found, starting from page 1")
+    except Exception as e:
+        print(f"Error loading checkpoint: {e}, starting from page 1")
+    
+    page = start_page
+    consecutive_empty_pages = 0
+    max_consecutive_empty = 3  # Stop after 3 consecutive empty pages
+    
+    while consecutive_empty_pages < max_consecutive_empty:
+        try:
+            print(f"Fetching projects page {page} (per_page={per_page})...")
+            
+            # Use timeout and be more specific with parameters
+            projects_page = gl.projects.list(
+                page=page, 
+                per_page=per_page, 
+                order_by='id', 
+                sort='asc',
+                simple=True,  # Get simplified project data
+                timeout=30    # 30 second timeout
+            )
+            
+            if not projects_page:
+                consecutive_empty_pages += 1
+                print(f"Empty page {page} ({consecutive_empty_pages}/{max_consecutive_empty})")
+                page += 1
+                continue
+            else:
+                consecutive_empty_pages = 0  # Reset counter
+            
+            projects.extend(projects_page)
+            print(f"Retrieved {len(projects)} projects so far... (page {page})")
+            
+            # Save checkpoint every 10 pages
+            if page % 10 == 0:
+                try:
+                    checkpoint_data = {
+                        'last_page': page + 1,
+                        'total_projects': len(projects),
+                        'timestamp': datetime.datetime.now().isoformat()
+                    }
+                    with open(checkpoint_file, 'w') as f:
+                        json.dump(checkpoint_data, f)
+                    print(f"Checkpoint saved at page {page}")
+                except Exception as e:
+                    print(f"Warning: Could not save checkpoint: {e}")
+            
+            page += 1
+            
+            # Longer delay between requests for stability
+            time.sleep(0.5)
+            
+            # Every 100 pages, take a longer break
+            if page % 100 == 0:
+                print(f"Taking a 10-second break after {page} pages...")
+                time.sleep(10)
+            
+        except Exception as e:
+            print(f"Error fetching projects page {page}: {e}")
+            # Save emergency checkpoint
+            try:
+                emergency_checkpoint = {
+                    'last_page': page,
+                    'total_projects': len(projects),
+                    'error': str(e),
+                    'timestamp': datetime.datetime.now().isoformat()
+                }
+                with open(f'emergency_{checkpoint_file}', 'w') as f:
+                    json.dump(emergency_checkpoint, f)
+                print(f"Emergency checkpoint saved")
+            except:
+                pass
+            raise
+    
+    # Clean up checkpoint file on successful completion
+    try:
+        if os.path.exists(checkpoint_file):
+            os.remove(checkpoint_file)
+            print("Checkpoint file cleaned up")
+    except:
+        pass
+    
+    print(f"Finished retrieving all projects. Total: {len(projects)}")
+    return projects
 
+
+@retry_transient_errors(max_retries=10, delay=5)
+def get_all_groups_with_checkpoints(gl, per_page=10, checkpoint_file='groups_checkpoint.json'):
+    """
+    Get all groups from GitLab with checkpoint system for recovery.
+    
+    Args:
+        gl (gitlab.Gitlab): GitLab connection object
+        per_page (int): Very small page size for stability
+        checkpoint_file (str): File to save progress
+    
+    Returns:
+        list: List of all groups
+    """
+    groups = []
+    start_page = 1
+    
+    # Try to load checkpoint
+    try:
+        with open(checkpoint_file, 'r') as f:
+            checkpoint_data = json.load(f)
+            start_page = checkpoint_data.get('last_page', 1)
+            print(f"Resuming groups from checkpoint - starting at page {start_page}")
+    except FileNotFoundError:
+        print("No groups checkpoint found, starting from page 1")
+    except Exception as e:
+        print(f"Error loading groups checkpoint: {e}, starting from page 1")
+    
+    page = start_page
+    consecutive_empty_pages = 0
+    max_consecutive_empty = 3
+    
+    while consecutive_empty_pages < max_consecutive_empty:
+        try:
+            print(f"Fetching groups page {page} (per_page={per_page})...")
+            
+            groups_page = gl.groups.list(
+                page=page, 
+                per_page=per_page, 
+                order_by='id', 
+                sort='asc',
+                simple=True,
+                timeout=30
+            )
+            
+            if not groups_page:
+                consecutive_empty_pages += 1
+                print(f"Empty groups page {page} ({consecutive_empty_pages}/{max_consecutive_empty})")
+                page += 1
+                continue
+            else:
+                consecutive_empty_pages = 0
+            
+            groups.extend(groups_page)
+            print(f"Retrieved {len(groups)} groups so far... (page {page})")
+            
+            # Save checkpoint every 5 pages (groups usually fewer than projects)
+            if page % 5 == 0:
+                try:
+                    checkpoint_data = {
+                        'last_page': page + 1,
+                        'total_groups': len(groups),
+                        'timestamp': datetime.datetime.now().isoformat()
+                    }
+                    with open(checkpoint_file, 'w') as f:
+                        json.dump(checkpoint_data, f)
+                    print(f"Groups checkpoint saved at page {page}")
+                except Exception as e:
+                    print(f"Warning: Could not save groups checkpoint: {e}")
+            
+            page += 1
+            time.sleep(0.5)
+            
+        except Exception as e:
+            print(f"Error fetching groups page {page}: {e}")
+            # Save emergency checkpoint
+            try:
+                emergency_checkpoint = {
+                    'last_page': page,
+                    'total_groups': len(groups),
+                    'error': str(e),
+                    'timestamp': datetime.datetime.now().isoformat()
+                }
+                with open(f'emergency_{checkpoint_file}', 'w') as f:
+                    json.dump(emergency_checkpoint, f)
+                print(f"Emergency groups checkpoint saved")
+            except:
+                pass
+            raise
+    
+    # Clean up checkpoint file
+    try:
+        if os.path.exists(checkpoint_file):
+            os.remove(checkpoint_file)
+            print("Groups checkpoint file cleaned up")
+    except:
+        pass
+    
+    print(f"Finished retrieving all groups. Total: {len(groups)}")
+    return groups
+
+
+@retry_transient_errors()
+def get_users_with_batch_processing(gl):
+    """
+    Get all users from GitLab with batch processing for large instances.
+    
+    Args:
+        gl (gitlab.Gitlab): GitLab connection object
+    
     Returns:
         tuple: (all_users, billable_users, non_billable_users)
     """
     try:
-        # Lists to store users by category
+        print("Starting user retrieval with batch processing...")
+        
+        # Get all users with smaller pages
         all_users = []
-
-        # Get all users with explicit pagination
         page = 1
-        per_page = 100
+        per_page = 20  # Even smaller for users
+        
         while True:
-            users_page = gl.users.list(page=page, per_page=per_page)
-            if not users_page:
-                break
-            all_users.extend(users_page)
-            page += 1
-            print(f"Retrieved {len(all_users)} users so far...")
+            try:
+                print(f"Fetching users page {page}...")
+                users_page = gl.users.list(
+                    page=page, 
+                    per_page=per_page, 
+                    order_by='id', 
+                    sort='asc',
+                    timeout=30
+                )
+                
+                if not users_page:
+                    print(f"No more users found. Total users retrieved: {len(all_users)}")
+                    break
+                    
+                all_users.extend(users_page)
+                print(f"Retrieved {len(all_users)} users so far...")
+                page += 1
+                time.sleep(0.3)
+                
+            except Exception as e:
+                print(f"Error fetching users page {page}: {e}")
+                raise
 
-        # Get projects and groups for membership checks with explicit pagination
-        projects = []
-        page = 1
-        while True:
-            projects_page = gl.projects.list(page=page, per_page=per_page)
-            if not projects_page:
-                break
-            projects.extend(projects_page)
-            page += 1
-            print(f"Retrieved {len(projects)} projects so far...")
+        print(f"Finished retrieving all users. Total: {len(all_users)}")
 
-        groups = []
-        page = 1
-        while True:
-            groups_page = gl.groups.list(page=page, per_page=per_page)
-            if not groups_page:
-                break
-            groups.extend(groups_page)
-            page += 1
-            print(f"Retrieved {len(groups)} groups so far...")
+        # Get projects and groups with checkpoint system
+        print("Getting projects with checkpoint system...")
+        projects = get_all_projects_with_checkpoints(gl, per_page=10)
+        
+        print("Getting groups with checkpoint system...")
+        groups = get_all_groups_with_checkpoints(gl, per_page=10)
 
-        # Process each user
+        # Process users in batches
         billable_users = []
         non_billable_users = []
-        for user in all_users:
+        batch_size = 100
+        
+        for i in range(0, len(all_users), batch_size):
+            batch_end = min(i + batch_size, len(all_users))
+            print(f"Processing users batch {i//batch_size + 1}: users {i+1} to {batch_end}")
+            
+            batch_users = all_users[i:batch_end]
+            
+            for user in batch_users:
+                # Check if user is non-billable based on criteria
+                is_non_billable = False
 
-            # Check if user is non-billable based on criteria
-            is_non_billable = False
+                # 1. Deactivated or blocked users
+                if user.state != 'active':
+                    is_non_billable = True
 
-            # 1. Deactivated or blocked users
-            if user.state != 'active':
-                is_non_billable = True
+                # 2. Pending approval users
+                elif hasattr(user, 'state') and user.state == 'blocked_pending_approval':
+                    is_non_billable = True
 
-            # 2. Pending approval users
-            elif hasattr(user, 'state') and user.state == 'blocked_pending_approval':
-                is_non_billable = True
+                # 3. External users
+                elif user.external:
+                    is_non_billable = True
 
-            # 3. External users
-            elif user.external:
-                is_non_billable = True
+                # 4. GitLab-created accounts (Ghost User, bots, etc.)
+                elif (hasattr(user, 'username') and 
+                      (user.username == 'ghost' or 
+                       'bot' in user.username.lower() or 
+                       user.username.startswith('support-'))):
+                    is_non_billable = True
 
-            # 4. GitLab-created accounts (Ghost User, bots, etc.)
-            elif (hasattr(user, 'username') and 
-                  (user.username == 'ghost' or 
-                   'bot' in user.username.lower() or 
-                   user.username.startswith('support-'))):
-                is_non_billable = True
-
-            # 5. Users with only Minimal Access or Guest role on Ultimate subscription
-            # This would require checking user memberships which is more complex
-            # For simplicity, we'll assume all active non-external users are billable
-            # unless they match the criteria above
-
-            # Add user to appropriate list
-            if is_non_billable:
-                non_billable_users.append(user)
-            else:
-                billable_users.append(user)
+                # Add user to appropriate list
+                if is_non_billable:
+                    non_billable_users.append(user)
+                else:
+                    billable_users.append(user)
+            
+            # Short break between batches
+            time.sleep(1)
 
         return all_users, billable_users, non_billable_users
+        
     except Exception as e:
-        print(f"Error fetching users: {e}")
+        print(f"Error in batch processing users: {e}")
         sys.exit(1)
+
+
+# Update the main get_users function to use the new batch processing
+@retry_transient_errors()
+def get_users(gl):
+    """
+    Get all users from GitLab and determine their billable status.
+    Uses batch processing for large instances.
+    """
+    return get_users_with_batch_processing(gl)
 
 
 def generate_report(users, gl, output_file=None, user_type="all", user_types=None, include_roles=False, max_role_only=False, include_ad_info=False, ad_params=None):
