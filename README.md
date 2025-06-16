@@ -177,6 +177,25 @@ Additional criteria that may apply in certain GitLab environments (not fully imp
 
 This script implements these criteria to categorize users as billable or non-billable.
 
+## Retry Mechanism for Transient Errors
+
+The script includes a retry mechanism for handling transient errors that may occur during GitLab API calls. This makes the script more robust when dealing with network issues, rate limiting, or temporary service unavailability.
+
+The following transient errors are automatically retried:
+- GitlabHttpError: HTTP errors from the GitLab API
+- GitlabConnectionError: Connection issues when communicating with GitLab
+- GitlabTimeoutError: Timeouts when waiting for a response from GitLab
+
+By default, the script will:
+- Retry failed API calls up to 3 times
+- Use exponential backoff between retries (starting at 1 second and doubling each time)
+- Print informative messages about the errors and retry attempts
+
+This retry mechanism is applied to the following functions:
+- `connect_to_gitlab`: Initial connection to GitLab
+- `get_user_roles`: Retrieving user roles across projects and groups
+- `get_users`: Retrieving all users and determining their billable status
+
 ## License
 
 MIT

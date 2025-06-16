@@ -10,11 +10,53 @@ import os
 import sys
 import argparse
 import datetime
+import time
+import functools
 import gitlab
 import pandas as pd
-import ldap
+import urllib3
 
 
+# import ldap
+
+
+def retry_transient_errors(max_retries=3, delay=1, exceptions=(gitlab.exceptions.GitlabHttpError, gitlab.exceptions.GitlabConnectionError, gitlab.exceptions.GitlabTimeoutError)):
+    """
+    Decorator to retry functions that might fail due to transient GitLab API errors.
+
+    Args:
+        max_retries (int): Maximum number of retry attempts
+        delay (int): Initial delay between retries in seconds (will be exponentially increased)
+        exceptions (tuple): Tuple of exception classes to catch and retry on
+
+    Returns:
+        function: Decorated function with retry logic
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            retries = 0
+            current_delay = delay
+
+            while True:
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    retries += 1
+                    if retries > max_retries:
+                        print(f"Maximum retries ({max_retries}) exceeded. Last error: {e}")
+                        raise
+
+                    print(f"Transient error occurred: {e}. Retrying in {current_delay} seconds... (Attempt {retries}/{max_retries})")
+                    time.sleep(current_delay)
+                    # Exponential backoff
+                    current_delay *= 2
+
+        return wrapper
+    return decorator
+
+
+@retry_transient_errors()
 def connect_to_gitlab(url, token):
     """
     Connect to GitLab instance using the provided URL and token.
@@ -27,7 +69,8 @@ def connect_to_gitlab(url, token):
         gitlab.Gitlab: GitLab connection object
     """
     try:
-        gl = gitlab.Gitlab(url=url, private_token=token)
+        gl = gitlab.Gitlab(url=url, private_token=token, ssl_verify=False)
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         gl.auth()
         return gl
     except gitlab.exceptions.GitlabAuthenticationError:
@@ -38,6 +81,7 @@ def connect_to_gitlab(url, token):
         sys.exit(1)
 
 
+@retry_transient_errors()
 def get_user_roles(gl, user_id):
     """
     Get all roles for a specific user across all projects and groups.
@@ -201,6 +245,7 @@ def get_ad_info(username, ad_server, ad_base_dn, ad_username, ad_password):
 
     return ad_info
 
+@retry_transient_errors()
 def get_users(gl):
     """
     Get all users from GitLab and determine their billable status.
