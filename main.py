@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python3
 """
 GitLab Users Report Generator
@@ -85,218 +84,6 @@ def connect_to_gitlab(url, token):
     except Exception as e:
         print(f"Failed to connect to GitLab: {e}")
         sys.exit(1)
-
-
-@retry_transient_errors(max_retries=5, delay=3)
-def get_user_roles_optimized(gl, user_id, skip_roles=False):
-    """
-    Get all roles for a specific user across all projects and groups.
-    Optimized version that reduces API calls and handles errors gracefully.
-
-    Args:
-        gl (gitlab.Gitlab): GitLab connection object
-        user_id (int): User ID
-        skip_roles (bool): If True, skip detailed role analysis (for performance)
-
-    Returns:
-        dict: Dictionary with project and group roles, and maximum roles
-    """
-    roles = {
-        'project_roles': [],
-        'group_roles': [],
-        'max_role_level': 0,
-        'max_role_name': ''
-    }
-
-    if skip_roles:
-        print(f"Skipping detailed role analysis for user {user_id} (performance mode)")
-        return roles
-
-    try:
-        print(f"Getting roles for user {user_id}...")
-        
-        # Method 1: Try to get user directly and check memberships
-        try:
-            user = gl.users.get(user_id)
-            print(f"Processing roles for user: {user.username}")
-        except Exception as e:
-            print(f"Warning: Could not get user {user_id}: {e}")
-            return roles
-
-        # Method 2: Use user memberships API if available (more efficient)
-        try:
-            # Try to get user's project memberships directly
-            user_projects = user.projects.list(all=True)
-            for project_membership in user_projects:
-                try:
-                    # Get the actual project to get the name
-                    project = gl.projects.get(project_membership.id, lazy=True)
-                    access_level = getattr(project_membership, 'access_level', 0)
-                    
-                    if access_level > roles['max_role_level']:
-                        roles['max_role_level'] = access_level
-                        roles['max_role_name'] = get_role_name(access_level)
-
-                    roles['project_roles'].append({
-                        'project_id': project_membership.id,
-                        'project_name': getattr(project, 'name', f'Project-{project_membership.id}'),
-                        'access_level': access_level,
-                        'role_name': get_role_name(access_level)
-                    })
-                except Exception as e:
-                    print(f"Warning: Error processing project membership {project_membership.id}: {e}")
-                    continue
-
-        except Exception as e:
-            print(f"User memberships API not available or failed: {e}")
-            # Fallback to the slower method but with optimizations
-            return get_user_roles_fallback(gl, user_id)
-
-        # Method 3: Get group memberships
-        try:
-            # Get user's groups using a more efficient approach
-            page = 1
-            per_page = 20
-            groups_checked = 0
-            max_groups_to_check = 500  # Limit to prevent timeout
-            
-            while groups_checked < max_groups_to_check:
-                try:
-                    groups_page = gl.groups.list(
-                        page=page, 
-                        per_page=per_page,
-                        simple=True,
-                        timeout=15
-                    )
-                    
-                    if not groups_page:
-                        break
-                    
-                    for group in groups_page:
-                        groups_checked += 1
-                        if groups_checked >= max_groups_to_check:
-                            print(f"Reached maximum groups limit ({max_groups_to_check}) for user {user_id}")
-                            break
-                            
-                        try:
-                            # Check if user is member of this group
-                            member = group.members.get(user_id, lazy=False)
-                            if member:
-                                access_level = getattr(member, 'access_level', 0)
-                                
-                                if access_level > roles['max_role_level']:
-                                    roles['max_role_level'] = access_level
-                                    roles['max_role_name'] = get_role_name(access_level)
-
-                                roles['group_roles'].append({
-                                    'group_id': group.id,
-                                    'group_name': group.name,
-                                    'access_level': access_level,
-                                    'role_name': get_role_name(access_level)
-                                })
-                        except gitlab.exceptions.GitlabGetError:
-                            # User is not a member of this group, which is normal
-                            continue
-                        except Exception as e:
-                            print(f"Warning: Error checking group {group.id} for user {user_id}: {e}")
-                            continue
-                    
-                    page += 1
-                    time.sleep(0.2)  # Small delay between group pages
-                    
-                except Exception as e:
-                    print(f"Error fetching groups page {page}: {e}")
-                    break
-
-        except Exception as e:
-            print(f"Error getting group roles for user {user_id}: {e}")
-
-    except Exception as e:
-        print(f"Error getting roles for user {user_id}: {e}")
-
-    print(f"Found {len(roles['project_roles'])} project roles and {len(roles['group_roles'])} group roles for user {user_id}")
-    return roles
-
-
-@retry_transient_errors(max_retries=3, delay=5)
-def get_user_roles_fallback(gl, user_id):
-    """
-    Fallback method for getting user roles with heavy optimizations.
-    Only checks a sample of projects to avoid timeouts.
-    """
-    print(f"Using fallback role detection for user {user_id}")
-    
-    roles = {
-        'project_roles': [],
-        'group_roles': [],
-        'max_role_level': 0,
-        'max_role_name': ''
-    }
-
-    try:
-        # Only check first 100 projects (sample)
-        projects_checked = 0
-        max_projects_to_check = 100
-        page = 1
-        per_page = 20
-
-        print(f"Checking sample of projects for user {user_id} roles...")
-        
-        while projects_checked < max_projects_to_check:
-            try:
-                projects_page = gl.projects.list(
-                    page=page, 
-                    per_page=per_page,
-                    simple=True,
-                    order_by='last_activity_at',  # Most active projects first
-                    sort='desc',
-                    timeout=10
-                )
-                
-                if not projects_page:
-                    break
-                
-                for project in projects_page:
-                    projects_checked += 1
-                    if projects_checked >= max_projects_to_check:
-                        break
-                    
-                    try:
-                        # Check if user is member
-                        member = project.members.get(user_id, lazy=False)
-                        if member:
-                            access_level = getattr(member, 'access_level', 0)
-                            
-                            if access_level > roles['max_role_level']:
-                                roles['max_role_level'] = access_level
-                                roles['max_role_name'] = get_role_name(access_level)
-
-                            roles['project_roles'].append({
-                                'project_id': project.id,
-                                'project_name': project.name,
-                                'access_level': access_level,
-                                'role_name': get_role_name(access_level)
-                            })
-                    except gitlab.exceptions.GitlabGetError:
-                        # User is not a member, which is normal
-                        continue
-                    except Exception as e:
-                        print(f"Warning: Error checking project {project.id}: {e}")
-                        continue
-                
-                page += 1
-                time.sleep(0.3)
-                
-            except Exception as e:
-                print(f"Error in fallback project check page {page}: {e}")
-                break
-
-        print(f"Fallback method found {len(roles['project_roles'])} project roles for user {user_id}")
-
-    except Exception as e:
-        print(f"Error in fallback role detection for user {user_id}: {e}")
-
-    return roles
 
 
 @retry_transient_errors()
@@ -478,7 +265,7 @@ def get_all_projects_with_checkpoints(gl, per_page=10, checkpoint_file='projects
     """
     projects = []
     start_page = 1
-    
+
     # Try to load checkpoint
     try:
         with open(checkpoint_file, 'r') as f:
@@ -489,25 +276,25 @@ def get_all_projects_with_checkpoints(gl, per_page=10, checkpoint_file='projects
         print("No checkpoint found, starting from page 1")
     except Exception as e:
         print(f"Error loading checkpoint: {e}, starting from page 1")
-    
+
     page = start_page
     consecutive_empty_pages = 0
     max_consecutive_empty = 3  # Stop after 3 consecutive empty pages
-    
+
     while consecutive_empty_pages < max_consecutive_empty:
         try:
             print(f"Fetching projects page {page} (per_page={per_page})...")
-            
+
             # Use timeout and be more specific with parameters
             projects_page = gl.projects.list(
-                page=page, 
-                per_page=per_page, 
-                order_by='id', 
+                page=page,
+                per_page=per_page,
+                order_by='id',
                 sort='asc',
                 simple=True,  # Get simplified project data
                 timeout=30    # 30 second timeout
             )
-            
+
             if not projects_page:
                 consecutive_empty_pages += 1
                 print(f"Empty page {page} ({consecutive_empty_pages}/{max_consecutive_empty})")
@@ -515,10 +302,10 @@ def get_all_projects_with_checkpoints(gl, per_page=10, checkpoint_file='projects
                 continue
             else:
                 consecutive_empty_pages = 0  # Reset counter
-            
+
             projects.extend(projects_page)
             print(f"Retrieved {len(projects)} projects so far... (page {page})")
-            
+
             # Save checkpoint every 10 pages
             if page % 10 == 0:
                 try:
@@ -532,17 +319,17 @@ def get_all_projects_with_checkpoints(gl, per_page=10, checkpoint_file='projects
                     print(f"Checkpoint saved at page {page}")
                 except Exception as e:
                     print(f"Warning: Could not save checkpoint: {e}")
-            
+
             page += 1
-            
+
             # Longer delay between requests for stability
             time.sleep(0.5)
-            
+
             # Every 100 pages, take a longer break
             if page % 100 == 0:
                 print(f"Taking a 10-second break after {page} pages...")
                 time.sleep(10)
-            
+
         except Exception as e:
             print(f"Error fetching projects page {page}: {e}")
             # Save emergency checkpoint
@@ -559,7 +346,7 @@ def get_all_projects_with_checkpoints(gl, per_page=10, checkpoint_file='projects
             except:
                 pass
             raise
-    
+
     # Clean up checkpoint file on successful completion
     try:
         if os.path.exists(checkpoint_file):
@@ -567,7 +354,7 @@ def get_all_projects_with_checkpoints(gl, per_page=10, checkpoint_file='projects
             print("Checkpoint file cleaned up")
     except:
         pass
-    
+
     print(f"Finished retrieving all projects. Total: {len(projects)}")
     return projects
 
@@ -587,7 +374,7 @@ def get_all_groups_with_checkpoints(gl, per_page=10, checkpoint_file='groups_che
     """
     groups = []
     start_page = 1
-    
+
     # Try to load checkpoint
     try:
         with open(checkpoint_file, 'r') as f:
@@ -598,24 +385,24 @@ def get_all_groups_with_checkpoints(gl, per_page=10, checkpoint_file='groups_che
         print("No groups checkpoint found, starting from page 1")
     except Exception as e:
         print(f"Error loading groups checkpoint: {e}, starting from page 1")
-    
+
     page = start_page
     consecutive_empty_pages = 0
     max_consecutive_empty = 3
-    
+
     while consecutive_empty_pages < max_consecutive_empty:
         try:
             print(f"Fetching groups page {page} (per_page={per_page})...")
-            
+
             groups_page = gl.groups.list(
-                page=page, 
-                per_page=per_page, 
-                order_by='id', 
+                page=page,
+                per_page=per_page,
+                order_by='id',
                 sort='asc',
                 simple=True,
                 timeout=30
             )
-            
+
             if not groups_page:
                 consecutive_empty_pages += 1
                 print(f"Empty groups page {page} ({consecutive_empty_pages}/{max_consecutive_empty})")
@@ -623,10 +410,10 @@ def get_all_groups_with_checkpoints(gl, per_page=10, checkpoint_file='groups_che
                 continue
             else:
                 consecutive_empty_pages = 0
-            
+
             groups.extend(groups_page)
             print(f"Retrieved {len(groups)} groups so far... (page {page})")
-            
+
             # Save checkpoint every 5 pages (groups usually fewer than projects)
             if page % 5 == 0:
                 try:
@@ -640,10 +427,10 @@ def get_all_groups_with_checkpoints(gl, per_page=10, checkpoint_file='groups_che
                     print(f"Groups checkpoint saved at page {page}")
                 except Exception as e:
                     print(f"Warning: Could not save groups checkpoint: {e}")
-            
+
             page += 1
             time.sleep(0.5)
-            
+
         except Exception as e:
             print(f"Error fetching groups page {page}: {e}")
             # Save emergency checkpoint
@@ -660,7 +447,7 @@ def get_all_groups_with_checkpoints(gl, per_page=10, checkpoint_file='groups_che
             except:
                 pass
             raise
-    
+
     # Clean up checkpoint file
     try:
         if os.path.exists(checkpoint_file):
@@ -668,7 +455,7 @@ def get_all_groups_with_checkpoints(gl, per_page=10, checkpoint_file='groups_che
             print("Groups checkpoint file cleaned up")
     except:
         pass
-    
+
     print(f"Finished retrieving all groups. Total: {len(groups)}")
     return groups
 
@@ -686,32 +473,32 @@ def get_users_with_batch_processing(gl):
     """
     try:
         print("Starting user retrieval with batch processing...")
-        
+
         # Get all users with smaller pages
         all_users = []
         page = 1
         per_page = 20  # Even smaller for users
-        
+
         while True:
             try:
                 print(f"Fetching users page {page}...")
                 users_page = gl.users.list(
-                    page=page, 
-                    per_page=per_page, 
-                    order_by='id', 
+                    page=page,
+                    per_page=per_page,
+                    order_by='id',
                     sort='asc',
                     timeout=30
                 )
-                
+
                 if not users_page:
                     print(f"No more users found. Total users retrieved: {len(all_users)}")
                     break
-                    
+
                 all_users.extend(users_page)
                 print(f"Retrieved {len(all_users)} users so far...")
                 page += 1
                 time.sleep(0.3)
-                
+
             except Exception as e:
                 print(f"Error fetching users page {page}: {e}")
                 raise
@@ -721,7 +508,7 @@ def get_users_with_batch_processing(gl):
         # Get projects and groups with checkpoint system
         print("Getting projects with checkpoint system...")
         projects = get_all_projects_with_checkpoints(gl, per_page=10)
-        
+
         print("Getting groups with checkpoint system...")
         groups = get_all_groups_with_checkpoints(gl, per_page=10)
 
@@ -729,13 +516,13 @@ def get_users_with_batch_processing(gl):
         billable_users = []
         non_billable_users = []
         batch_size = 100
-        
+
         for i in range(0, len(all_users), batch_size):
             batch_end = min(i + batch_size, len(all_users))
             print(f"Processing users batch {i//batch_size + 1}: users {i+1} to {batch_end}")
-            
+
             batch_users = all_users[i:batch_end]
-            
+
             for user in batch_users:
                 # Check if user is non-billable based on criteria
                 is_non_billable = False
@@ -753,9 +540,9 @@ def get_users_with_batch_processing(gl):
                     is_non_billable = True
 
                 # 4. GitLab-created accounts (Ghost User, bots, etc.)
-                elif (hasattr(user, 'username') and 
-                      (user.username == 'ghost' or 
-                       'bot' in user.username.lower() or 
+                elif (hasattr(user, 'username') and
+                      (user.username == 'ghost' or
+                       'bot' in user.username.lower() or
                        user.username.startswith('support-'))):
                     is_non_billable = True
 
@@ -764,12 +551,12 @@ def get_users_with_batch_processing(gl):
                     non_billable_users.append(user)
                 else:
                     billable_users.append(user)
-            
+
             # Short break between batches
             time.sleep(1)
 
         return all_users, billable_users, non_billable_users
-        
+
     except Exception as e:
         print(f"Error in batch processing users: {e}")
         sys.exit(1)
@@ -785,29 +572,28 @@ def get_users(gl):
     return get_users_with_batch_processing(gl)
 
 
-def generate_report_with_performance_mode(users, gl, output_file=None, user_type="all", user_types=None, include_roles=False, max_role_only=False, include_ad_info=False, ad_params=None, performance_mode=False):
+def generate_report(users, gl, output_file=None, user_type="all", user_types=None, include_roles=False, max_role_only=False, include_ad_info=False, ad_params=None):
     """
-    Enhanced generate_report function with performance mode for large instances.
-    
+    Generate a report of users.
+
     Args:
-        performance_mode (bool): If True, skip detailed role analysis for better performance
-        ... (other args same as original)
+        users (list): List of GitLab user objects
+        gl (gitlab.Gitlab): GitLab connection object
+        output_file (str, optional): Path to output CSV file
+        user_type (str): Default type of users in the report ("all", "billable", or "non_billable")
+        user_types (dict, optional): Dictionary mapping user IDs to their types
+        include_roles (bool): Whether to include user roles in the report
+        max_role_only (bool): Whether to include only the maximum role of the user
+        include_ad_info (bool): Whether to include Active Directory information for billable users
+        ad_params (dict, optional): Dictionary with Active Directory connection parameters
+            (server, base_dn, username, password)
+
+    Returns:
+        pandas.DataFrame: DataFrame containing user information
     """
     # Extract relevant information from user objects
     user_data = []
-    
-    if include_roles and len(users) > 1000 and not performance_mode:
-        print(f"Warning: {len(users)} users detected. Role analysis may take a very long time.")
-        print("Consider using performance_mode=True to skip detailed role analysis.")
-        response = input("Continue with full role analysis? (y/N): ").lower()
-        if response != 'y':
-            print("Skipping role analysis. Set include_roles=False or performance_mode=True")
-            include_roles = False
-    
-    for i, user in enumerate(users):
-        if i % 50 == 0:
-            print(f"Processing user {i+1}/{len(users)}")
-        
+    for user in users:
         # Determine user_type for this specific user
         current_user_type = user_type
         if user_types and user.id in user_types:
@@ -846,8 +632,7 @@ def generate_report_with_performance_mode(users, gl, output_file=None, user_type
         # Get user roles if requested
         if include_roles:
             try:
-                # Use optimized role detection
-                roles = get_user_roles_optimized(gl, user.id, skip_roles=performance_mode)
+                roles = get_user_roles(gl, user.id)
 
                 # Add maximum role
                 user_info['max_role'] = roles['max_role_name']
@@ -892,25 +677,105 @@ def generate_report_with_performance_mode(users, gl, output_file=None, user_type
     return df
 
 
-# Update the original generate_report to use the enhanced version
-def generate_report(users, gl, output_file=None, user_type="all", user_types=None, include_roles=False, max_role_only=False, include_ad_info=False, ad_params=None):
-    """
-    Generate a report of users with automatic performance optimization.
-    """
-    # Automatically enable performance mode for large user sets with roles
-    performance_mode = include_roles and len(users) > 500
-    
-    if performance_mode:
-        print(f"Performance mode enabled due to {len(users)} users. Detailed role analysis will be limited.")
-    
-    return generate_report_with_performance_mode(
-        users, gl, output_file, user_type, user_types, 
-        include_roles, max_role_only, include_ad_info, ad_params, 
-        performance_mode
-    )
-
-
 def main():
     """Main function to run the script."""
     parser = argparse.ArgumentParser(description='Generate reports of all GitLab users, billable users, and non-billable users')
-    parser.add_argument('--url', default=os.environ.get('GITLAB_URL
+    parser.add_argument('--url', default=os.environ.get('GITLAB_URL', 'https://gitlab.com'),
+                        help='GitLab instance URL (default: https://gitlab.com or GITLAB_URL env var)')
+    parser.add_argument('--token', default=os.environ.get('GITLAB_TOKEN'),
+                        help='GitLab API token (default: GITLAB_TOKEN env var)')
+    parser.add_argument('--output-all', default=f'gitlab_all_users_{datetime.date.today()}.csv',
+                        help='Output CSV file path for all users')
+    parser.add_argument('--output-billable', default=f'gitlab_billable_users_{datetime.date.today()}.csv',
+                        help='Output CSV file path for billable users')
+    parser.add_argument('--output-non-billable', default=f'gitlab_non_billable_users_{datetime.date.today()}.csv',
+                        help='Output CSV file path for non-billable users')
+    parser.add_argument('--include-roles', action='store_true',
+                        help='Include user roles in the reports')
+    parser.add_argument('--max-role-only', action='store_true',
+                        help='Include only the maximum role of each user (requires --include-roles)')
+
+    # Active Directory integration parameters
+    parser.add_argument('--include-ad-info', action='store_true',
+                        help='Include Active Directory information for billable users')
+    parser.add_argument('--ad-server', default=os.environ.get('AD_SERVER'),
+                        help='Active Directory server URL (default: AD_SERVER env var)')
+    parser.add_argument('--ad-base-dn', default=os.environ.get('AD_BASE_DN'),
+                        help='Base DN for LDAP search (default: AD_BASE_DN env var)')
+    parser.add_argument('--ad-username', default=os.environ.get('AD_USERNAME'),
+                        help='Username for LDAP authentication (default: AD_USERNAME env var)')
+    parser.add_argument('--ad-password', default=os.environ.get('AD_PASSWORD'),
+                        help='Password for LDAP authentication (default: AD_PASSWORD env var)')
+
+    args = parser.parse_args()
+
+    if not args.token:
+        print("GitLab API token is required. Provide it with --token or set GITLAB_TOKEN environment variable.")
+        sys.exit(1)
+
+    if args.max_role_only and not args.include_roles:
+        print("Warning: --max-role-only requires --include-roles. Enabling --include-roles automatically.")
+        args.include_roles = True
+
+    # Check if Active Directory integration is requested
+    if args.include_ad_info:
+        if not all([args.ad_server, args.ad_base_dn, args.ad_username, args.ad_password]):
+            print("Warning: Active Directory integration requires all AD parameters (--ad-server, --ad-base-dn, --ad-username, --ad-password).")
+            print("You can also set them using environment variables (AD_SERVER, AD_BASE_DN, AD_USERNAME, AD_PASSWORD).")
+            args.include_ad_info = False
+            print("Disabling Active Directory integration.")
+        else:
+            print("Active Directory integration enabled.")
+
+    # Connect to GitLab
+    gl = connect_to_gitlab(args.url, args.token)
+    print(f"Connected to GitLab instance at {args.url}")
+
+    # Get users
+    all_users, billable_users, non_billable_users = get_users(gl)
+    print(f"Found {len(all_users)} total users")
+    print(f"Found {len(billable_users)} billable users")
+    print(f"Found {len(non_billable_users)} non-billable users")
+
+    # Create a dictionary mapping user IDs to their types
+    user_types = {}
+    for user in billable_users:
+        user_types[user.id] = "billable"
+    for user in non_billable_users:
+        user_types[user.id] = "non_billable"
+
+    # Prepare Active Directory parameters if needed
+    ad_params = None
+    if args.include_ad_info:
+        ad_params = {
+            'server': args.ad_server,
+            'base_dn': args.ad_base_dn,
+            'username': args.ad_username,
+            'password': args.ad_password
+        }
+
+    # Generate reports
+    all_report = generate_report(all_users, gl, args.output_all, "all", user_types, args.include_roles, args.max_role_only, args.include_ad_info, ad_params)
+    billable_report = generate_report(billable_users, gl, args.output_billable, "billable", None, args.include_roles, args.max_role_only, args.include_ad_info, ad_params)
+    non_billable_report = generate_report(non_billable_users, gl, args.output_non_billable, "non_billable", None, args.include_roles, args.max_role_only, args.include_ad_info, ad_params)
+
+    # Print summary
+    print("\nSummary:")
+    print(f"Total users: {len(all_users)}")
+    print(f"Billable users: {len(billable_users)}")
+    print(f"Non-billable users: {len(non_billable_users)}")
+
+    if args.include_roles:
+        if args.max_role_only:
+            print("\nOnly maximum user roles have been included in the reports.")
+        else:
+            print("\nAll user roles have been included in the reports.")
+
+    if args.include_ad_info:
+        print("\nActive Directory information (manager and department) has been included for billable users.")
+
+    return all_report, billable_report, non_billable_report
+
+
+if __name__ == '__main__':
+    main()

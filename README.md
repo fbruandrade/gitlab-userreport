@@ -1,6 +1,9 @@
-# GitLab Users Report Generator
+# GitLab Users and Topics Report Generator
 
-This script connects to a GitLab instance using the python-gitlab library and generates reports of all users, billable users, and non-billable users.
+This repository contains scripts to connect to a GitLab instance using the python-gitlab library and generate various reports:
+
+1. **Users Report**: Generate reports of all users, billable users, and non-billable users.
+2. **Topics Report**: Generate reports of all project topics, including counts of how many projects use each topic.
 
 ## Requirements
 
@@ -207,6 +210,92 @@ Key features of the pagination implementation:
 - Efficiently processes large datasets without memory issues
 
 This makes the script suitable for use with GitLab instances of any size, from small teams to large enterprises with thousands of users.
+
+## GitLab Topics Report Generator
+
+The Topics Report Generator script (`topics_report.py`) analyzes all projects in a GitLab instance and generates reports about the topics used across these projects.
+
+### Features
+
+- Fetches all projects from a GitLab instance with efficient pagination
+- Extracts and counts topics from each project
+- Groups related topics (e.g., counts dotnet6 and dotnet8 as part of the dotnet group)
+- Generates comprehensive reports in CSV format
+- Handles large GitLab instances with thousands of projects
+- Includes checkpoint system to resume from interruptions
+
+### Basic Usage
+
+Run the script with your GitLab API token:
+
+```bash
+python topics_report.py --token YOUR_GITLAB_API_TOKEN
+```
+
+This will generate three CSV files:
+- `gitlab_topics_report_individual.csv`: Individual topics and their counts
+- `gitlab_topics_report_grouped.csv`: Grouped topics and their counts
+- `gitlab_topics_report_projects.csv`: Projects and their associated topics
+
+### Programmatic Usage
+
+You can also use the functions from the topics report script programmatically in your own Python code. See `example_topics.py` for a demonstration:
+
+```bash
+python example_topics.py
+```
+
+This example shows how to:
+- Connect to GitLab
+- Fetch all projects
+- Analyze topics across projects
+- Generate topic reports
+- Perform additional analysis on the topics data
+
+### Command Line Arguments
+
+The script accepts the following command line arguments:
+
+- `--url`: GitLab instance URL (default: GITLAB_URL environment variable)
+- `--token`: GitLab API token (default: GITLAB_TOKEN environment variable)
+- `--output`: Output file prefix for CSV reports (default: gitlab_topics_report)
+- `--per-page`: Number of items per page for pagination (default: 10)
+
+### Examples
+
+1. Connect to a self-hosted GitLab instance:
+   ```bash
+   python topics_report.py --url https://gitlab.example.com --token YOUR_GITLAB_API_TOKEN
+   ```
+
+2. Specify a custom output file prefix:
+   ```bash
+   python topics_report.py --token YOUR_GITLAB_API_TOKEN --output my_topics_report
+   ```
+
+3. Using environment variables:
+   ```bash
+   export GITLAB_URL=https://gitlab.example.com
+   export GITLAB_TOKEN=YOUR_GITLAB_API_TOKEN
+   python topics_report.py
+   ```
+
+### Output
+
+The script generates three CSV files:
+
+1. **Individual Topics Report** (`*_individual.csv`):
+   - `topic`: The name of the topic
+   - `project_count`: The number of projects using this topic
+
+2. **Grouped Topics Report** (`*_grouped.csv`):
+   - `topic_group`: The base name of the topic group (e.g., "dotnet" for "dotnet6", "dotnet8")
+   - `total_projects`: The total number of projects in this topic group
+
+3. **Projects Topics Report** (`*_projects.csv`):
+   - `project_id`: The ID of the project
+   - `topics`: A comma-separated list of topics associated with the project
+   - `topic_count`: The number of topics associated with the project
 
 ## License
 
